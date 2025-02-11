@@ -1,0 +1,73 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  HIGH_THRESHOLD: 5
+  MEDIUM_THRESHOLD: 10
+
+stages:
+- stage: Build
+  displayName: 'Build Application'
+  jobs:
+  - job: BuildJob
+    displayName: 'Compile Java Code'
+    steps:
+    - checkout: self
+
+    - task: Maven@3
+      displayName: 'Maven Compile'
+      inputs:
+        mavenPomFile: 'pom.xml'
+        goals: 'clean compile'
+
+- stage: SecurityScan
+  displayName: 'SonarQube Security Scan'
+  jobs:
+  - job: SonarQubeScan
+    displayName: 'Run SonarQube Analysis'
+    steps:
+    - task: SonarQubePrepare@5
+      displayName: 'Prepare SonarQube Scan'
+      inputs:
+        SonarQube: 'SonarQubeServiceConnection'
+        scannerMode: 'CLI'
+        configMode: 'manual'
+        cliProjectKey: 'java-vulnerable-project'
+        cliProjectName: 'Java Vulnerability Test'
+        cliSources: '$(Build.SourcesDirectory)'
+
+    - task: SonarQubeAnalyze@5
+      displayName: 'Run SonarQube Analysis'
+
+    - task: SonarQubePublish@5
+      displayName: 'Publish SonarQube Results'
+
+    - script: |
+        # Extract SonarQube report
+        SONAR_REPORT=$(curl -s "$SONAR_HOST_URL/api/issues/search?componentKeys=java-vulnerable-project&types=VULNERABILITY&statuses=OPEN&resolved=false" \
+        -u "$SONAR_TOKEN:" | jq '.issues | map(select(.severity == "CRITICAL" or .severity == "BLOCKER")) | length')
+
+        MEDIUM_COUNT=$(curl -s "$SONAR_HOST_URL/api/issues/search?componentKeys=java-vulnerable-project&types=VULNERABILITY&statuses=OPEN&resolved=false" \
+        -u "$SONAR_TOKEN:" | jq '.issues | map(select(.severity == "MAJOR")) | length')
+
+        echo "High Vulnerabilities: $SONAR_REPORT"
+        echo "Medium Vulnerabilities: $MEDIUM_COUNT"
+
+        if [ "$SONAR_REPORT" -ge "$HIGH_THRESHOLD" ]; then
+          echo "❌ High vulnerabilities exceed threshold! Stopping pipeline."
+          exit 1
+        fi
+
+        if [ "$MEDIUM_COUNT" -ge "$MEDIUM_THRESHOLD" ]; then
+          echo "❌ Medium vulnerabilities exceed threshold! Stopping pipeline."
+          exit 1
+        fi
+      env:
+        SONAR_HOST_URL: $(SonarQubeHostUrl)
+        SONAR_TOKEN: $(SonarQubeToken)
+      displayName: 'Check Vulnerabilities and Enforce Thresholds'
